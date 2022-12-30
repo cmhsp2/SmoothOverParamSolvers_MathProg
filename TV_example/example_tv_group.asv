@@ -1,0 +1,284 @@
+clearvars
+%2D gradient matrix
+%TV regularisation with quadratic loss. 
+
+addpath('../')
+
+
+OBJECTIVE = {};
+NAME = {};
+TIME = {};
+COLOR = {};
+
+type = 'colour';
+% type = 'phantom';
+% type = 'HSData';
+switch type
+    case 'phantom'
+        imgname = 'phantom2';
+        n1 = 64;
+        n2 = 64;
+        x0 = phantom(randn(8,6),n1);
+        x0 = x0(:);
+        p=n1*n2;
+        lambda = 10;
+        mode = 'inpaint';
+
+    case 'colour'
+        imgname = 'peppers';
+        imgname = 'pears';
+        im = im2double(imread(sprintf('%s.png',imgname)));
+        [n1,n2,~] = size(im);
+        p = n1*n2;
+        x0 = reshape(im,n1*n2,[]);
+        lambda = .5;
+        mode = 'inpaint';
+    case 'HSData'
+%         http://www.ehu.eus/ccwintco/index.php/Hyperspectral_Remote_Sensing_Scenes
+        imgname = 'HSData';
+        L = load('Indian_pines.mat');
+        im = L.indian_pines;
+        im = im/max(abs(im(:)));
+        [n1,n2,~] = size(im);
+        p = n1*n2;
+        x0 = reshape(im,p,[]);
+        lambda = 1;
+        mode = 'proxcalc';
+        
+end
+
+%%
+%gradient matrix
+[T1,T2] = SparseGrad(n1,n2);
+D = [T1;T2];
+
+isotropic= 1;
+
+
+% mode = 'proxcalc';
+% mode = 'inpaint';
+% mode = 'sparse';
+switch mode
+    case 'proxcalc' %A is identity, denoising
+        A = speye(p);
+        m = size(A,1);
+        proxcalc = 1;
+    case 'inpaint' %A is masking operator, inpainting
+        p = n1*n2;
+        A = speye(p);
+        indx = randperm(p,ceil(0.3*p));
+        A = A(indx, :);
+        m = size(A,1);
+        proxcalc = 0;
+    otherwise %A is random sparse matrix
+        proxcalc = 0;
+        m = ceil(p);
+        k=ceil( m/5);
+        
+        irand = randperm(m,k);
+        jrand = randperm(p,k);
+        zrand = sign(randn(k,1));
+        A = sparse(irand,jrand,zrand, m,p);
+        
+        %     m = ceil(p/4);
+        %     X = randn(m,p)/sqrt(m);
+        
+end
+
+%%
+y = A*x0;
+% y = awgn(y,10,'measured');
+
+%%
+
+if isotropic
+    t0 = randn(p,1);
+else
+    t0 = randn(2*p,1);
+end
+%%
+
+tic
+[beta_pro,R,a,v] = func_TV2D_pro(A,y,lambda,proxcalc,D,t0,isotropic);
+time1 = toc
+%%
+figure(2)
+imagesc(reshape(beta_pro,n1,[]));
+% imagesc(reshape(beta_pro,n1,n2,[]));
+f_pro = R.err(:,1);
+OBJECTIVE{end+1} = f_pro;
+NAME{end+1} = 'VarPro';
+TIME{end+1} = time1;
+
+COLOR{end+1} = 'b'
+objbest = min(f_pro);
+
+%% going to the dual and apply BFGS with bounds
+%min_{|z|_inf <=1 } |D' * z - y/lambda|^2
+if strcmp(mode, 'proxcalc') && ~isotropic
+    gradF = @(z) deal(lambda*norm(D'*z - y/lambda)^2/2 - norm(y)^2/2/lambda, lambda*D*(D'*z - y/lambda) );
+    
+    t0 = rand(2*p,1)*0.1;
+    warning off; tic;
+       
+    lb = -ones(2*p,1);
+    ub = ones(2*p,1);
+    opts    = struct('x0',t0,'printEvery', 1, 'm', 20, 'maxIts', 1000 );
+    opts.factr = 1e-4;
+    [t_, ~, R] = lbfgsb(gradF, lb, ub, opts );
+    f_ = R.err(:,1);
+    
+    warning on;
+    time3 = toc
+    
+    beta_chambolle = y - lambda*D'*t_;
+    
+    NAME{end+1} = 'LBFGS-dual';
+    TIME{end+1} = time3;
+    OBJECTIVE{end+1} = -f_;
+    COLOR{end+1} = 'g'
+
+    
+    objbest = min((-f_(end)),objbest);
+    
+    
+end
+
+
+%% Primal-Dual
+sigvals = [0.1,1,10];
+% sigvals = [ 1];
+
+for i=1:length(sigvals)
+    sig = sigvals(i);
+    tau = 0.9/8/sig;
+    niter = 1500;
+    if strcmp(type ,'HSData')
+        niter = 300;
+    end
+
+    AtA = A'*A;
+    Aty = A'*y;
+    switch mode
+        case 'proxcalc'
+            s = (1/(1 + (tau/lambda)));
+            G = @(v) s*v;
+        case 'inpaint'
+            inv_vec = ones(p,1); inv_vec(indx) = 1+(tau/lambda);
+            G = @(v) v./inv_vec;
+        otherwise
+            G = @(v)(speye(p) + (tau/lambda)*(AtA))\v;
+            
+    end
+    proxG = @(x) G((tau/lambda)*Aty + x);
+    
+    switch isotropic
+        case 1
+            S2 = @(x) sum(sqrt(sum(x(1:end/2,:).^2+x(end/2+1:end,:).^2,2)));
+            mfunc = @(x) S2(D*x) + norm(A*x - y, 'fro')^2/2/lambda;
+            proxFs = @(z) z - sig*groupthresh_TV(z/sig, 1/sig);
+        otherwise
+            mfunc = @(x) norm(D*x,1) + norm(A*x - y)^2/2/lambda;
+            proxFs = @(z) z - sig*wthresh(z/sig, 's', 1/sig);
+    end
+    record_interval = 10;
+    
+    init.x = Aty;
+    init.xi = D*Aty;
+    tic
+    [x,fvals] = func_PrimalDual(D,proxG,proxFs, sig,tau,niter,mfunc,record_interval,init);
+    time2 = toc
+    
+    
+    OBJECTIVE{i+1} = fvals;
+    NAME{i+1} = sprintf('PD \\sigma=%.2g',sig);
+    TIME{i+1} = time2;
+    COLOR{i+1} = [1,0,0]*i/length(sigvals);
+
+    objbest = min(objbest,min(fvals));
+    
+end
+
+%% ADMM
+
+niter = 50;
+if strcmp(type ,'HSData')
+        niter = 30;
+    end
+gamvals = [1,10,50];
+for ii = 1:length(gamvals)
+    gamma = gamvals(ii);
+    proxG = @(z) groupthresh_TV(z, lambda/gamma);
+    tic
+    [x,fvals] = func_ADMM(proxG,D,A,y,gamma,niter,mfunc);
+    timedr = toc
+    OBJECTIVE{end+1} = fvals;
+    NAME{end+1} = sprintf('ADMM \\gamma=%.2g',gamma);
+    TIME{end+1} = timedr;
+    COLOR{end+1} = [.5,1,0]*ii/length(gamvals);
+    objbest = min(objbest,min(fvals));
+end
+
+%%
+
+display_objectives(OBJECTIVE, NAME, TIME, COLOR, 'VarPro','obj_min')
+
+ ylim([1e-4,inf])
+
+
+f = gcf;
+set(gcf, 'Units', 'Inches', 'Position', [0, 0, 9., 7.], 'PaperUnits', 'Inches', 'PaperSize', [9., 7.])
+exportgraphics(f,sprintf('results/%s/%s_%d_%d_%.2f.png',imgname,mode, n1,n2,lambda),'Resolution',300)
+
+%% save images
+
+
+figure(2)
+clf
+yim = reshape(A'*y, n1,n2,[]);
+im_pro = reshape(beta_pro, n1,n2,[]);
+im_pd = reshape(x, n1,n2,[]);
+
+if strcmp(type,'colour')
+    imwrite(im_pro, sprintf('results/%s/Reconstr_%s_%d_%d_%.2f.png', imgname,mode,n1,n2,lambda));
+    imwrite(yim, sprintf('results/%s/Input_%s_%d_%d_%.2f.png', imgname,mode,n1,n2,lambda));
+
+end
+
+
+if length(size(im_pro))>2
+j = 3;
+idx = j;
+IShow = @(X) imagesc((X(:,:,idx)));
+if strcmp(type, 'colour')
+    IShow = @(X) imshow(X/max(X(:)));
+    
+end
+
+Aim = im_pro(:,:,idx);
+Bim = yim(:,:,idx);
+minD = min([Aim(:); Bim(:)]);
+maxD = max([Aim(:);Bim(:)]);
+mapped_image = (double(Aim) - minD) ./ (maxD - minD);
+mapped_noisyimage = (double(Bim) - minD) ./ (maxD - minD);
+
+imwrite(mapped_image,sprintf('results/%s/image_%s_%d_%d_%.2f.png',imgname,mode, n1,n2,lambda));
+imwrite(mapped_noisyimage,sprintf('results/%s/noisyimage_%s_%d_%d_%.2f.png',imgname,mode, n1,n2,lambda));
+
+
+
+subplot(1,3,1)
+IShow(im_pro)
+colorbar
+
+
+subplot(1,3,2)
+IShow(im_pd)
+colorbar
+
+subplot(1,3,3)
+IShow(yim)
+colorbar
+
+
+end

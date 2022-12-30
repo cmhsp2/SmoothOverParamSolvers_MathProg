@@ -1,0 +1,155 @@
+clc
+clearvars
+
+%solve min_x |x|_q s.t. Ax = b
+% where A is a random Gaussian matrix
+% Reproduces results in Figure 10 of our paper
+
+m0 =80;
+n=256;
+T = 1;
+s = 40;
+
+
+        
+varpro_1_count = zeros(12,1);
+varpro_1b_count = zeros(12,1);
+
+varpro_2_count = zeros(12,1);
+irls_count =zeros(12,1);
+l1_count =zeros(12,1);
+rwl1_count =zeros(12,1);
+
+varpro_1_time = 0;
+varpro_1b_time = 0;
+
+varpro_2_time  = 0;
+irls_time  =0;
+l1_time  =0;
+rwl1_time  =0;
+
+
+q= 2/3;%should be at least 0.5       
+lambda = 0;
+        
+
+for i=1:100 %run for 100 random instances
+    X_ = randn(m0+3*11,n);
+    x0 = randn(n,T);
+    x0(randperm(n,n-s),:)=0;
+    y_ = X_*x0;
+    for m_=1:12
+        m = m0+3*(m_-1);
+        X = X_(1:m,:);
+        y = y_(1:m,:);      
+               
+        %varpro lq (2 factors on outside, linear system on inside)
+        disp(['run: ',num2str(i)]);
+        disp('Running varpro with 3 factors, 1 inside ...');
+        
+        
+        tic
+        [b,R] = func_lq_varpro(X,y,lambda,q);
+        toc
+        
+        err = norm(b-x0)/norm(x0)
+               
+        t=toc;
+        varpro_1_time= varpro_1_time + t;
+       
+        if err<0.01
+            varpro_1_count(m_) = varpro_1_count(m_)  + 1;
+        end
+        
+        %%
+        disp('Running varpro (b) with 3 factors, 1 inside ...');
+        %rerun varpro an additional 2 times and take the best result 
+        %func_lq_varpro has a random initialisation factor
+        tic
+        for i_ = 1:2
+            [b,R] = func_lq_varpro(X,y,lambda,q);
+            err = min(norm(b-x0)/norm(x0), err);           
+        end
+        t=toc;
+        varpro_1b_time= varpro_1b_time + t;
+       
+        if err<0.01
+            varpro_1b_count(m_) = varpro_1b_count(m_)  + 1;
+        end
+        
+        %%
+        disp('Running varpro with 3 factors, 2 inside (solved by l1-varpro) ...');
+        
+        tic
+        x_u = func_lq_nonlin_varpro(X,y,lambda, q);           
+        t=toc;
+        varpro_2_time= varpro_2_time + t;
+        
+        err_u = norm(x_u-x0)/norm(x0)
+        % myfunc(x_u)
+        
+        if err_u<0.01
+            varpro_2_count(m_)  = varpro_2_count(m_)  + 1;
+        end
+        
+        %% group l1
+        disp('Running group l1 ...');
+        
+        tic
+        bl1 = func_l1_varpro(X,y,lambda);
+        err_l1 = norm(bl1-x0)/norm(x0)
+        t=toc;
+        l1_time= l1_time + t;
+       
+        
+        if err_l1<0.01
+            l1_count(m_) = l1_count(m_) + 1;
+        end
+        
+        %% IRLS
+        lambda0 = lambda*2/3;
+        disp('Running IRLS ...')
+        tic
+        irls_x = IRLS(X,y,lambda0,q);            
+        t=toc;
+        irls_time= irls_time + t;
+        
+        err_irls = norm(irls_x-x0)/norm(x0)
+ 
+        
+        if err_irls<0.01
+            irls_count(m_)  = irls_count(m_)  + 1;
+        end
+        
+        
+        %% reweighted l1
+        disp('runnning Reweighted l1 ...')
+        tic
+        x_rwl1 = rwl1(X,y,lambda0,q); 
+        t=toc;
+        rwl1_time= rwl1_time + t; 
+        err_rwl1 = norm(x_rwl1-x0)/norm(x0)
+                      
+        if err_rwl1<0.01
+            rwl1_count(m_)  = rwl1_count(m_) +1;
+        end
+        
+    end
+    
+end
+
+%% print results
+
+fprintf('m &\t varpro_1 & \t varpro_1b  & \t varpro_2  & \t IRLS  & \t rwl1  & \t l1 \n');
+
+for i=1:12
+    m = m0+(i-1)*3;
+fprintf('%d &\t %d & \t %d  & \t %d  & \t %d  & \t %d  & \t %d\n',...
+    m, varpro_1_count(i),varpro_1b_count(i), varpro_2_count(i), irls_count(i), rwl1_count(i), l1_count(i))
+
+end
+
+fprintf('Time (s) &\t %.1f & \t %.1f  & \t %.1f  & \t %.1f & \t %.1f  & \t %.1f\n',...
+     varpro_1_time,varpro_1b_time, varpro_2_time, irls_time, rwl1_time, l1_time)
+
+ 
